@@ -1,10 +1,10 @@
 # Video Downloader
 
-Download videos from Xiaohongshu (小红书) and Weibo (微博) posts by scanning QR codes from screenshots.
+Download videos from Xiaohongshu (小红书), Weibo (微博), and Instagram posts by scanning QR codes from screenshots.
 
 ## Features
 
-- Multi-platform support: Xiaohongshu and Weibo
+- Multi-platform support: Xiaohongshu, Weibo, and Instagram
 - Enhanced QR code reading with OpenCV fallback
 - Automatic platform detection from URL
 - Auto-resolve short URLs (xhslink.com)
@@ -71,7 +71,12 @@ With custom output directory:
 ./venv/bin/python video_downloader.py -u "https://weibo.com/userid/statusid"
 ```
 
-Or with short URL:
+**Instagram:**
+```bash
+./venv/bin/python video_downloader.py -u "https://instagram.com/p/xxx"
+```
+
+Or with short URL (Xiaohongshu):
 ```bash
 ./venv/bin/python video_downloader.py -u "http://xhslink.com/xxx"
 ```
@@ -105,10 +110,12 @@ Done!
 2. **Platform Detection**: Automatically detects platform from URL:
    - `xiaohongshu.com` or `xhslink.com` → Xiaohongshu
    - `weibo.com` or `weibo.cn` → Weibo
+   - `instagram.com` → Instagram
 
 3. **Video Extraction**:
    - **Xiaohongshu**: Parses `masterUrl` from embedded page data
    - **Weibo**: Uses mobile API (`m.weibo.cn/statuses/show`) to get video URLs, preferring 720p quality
+   - **Instagram**: Uses yt-dlp library to extract video URLs
 
 4. **Download**: Videos are downloaded with streaming to handle large files, showing progress percentage.
 
@@ -120,6 +127,7 @@ Done!
 | `Pillow` | Image processing for loading screenshots |
 | `pyzbar` | QR code decoding (requires zbar system library) |
 | `opencv-python` | Enhanced QR code detection and image processing |
+| `yt-dlp` | Instagram video extraction |
 
 ### File Structure
 
@@ -139,6 +147,7 @@ xhs_video_downloader/
 |----------|--------------|--------------|
 | Xiaohongshu | `xiaohongshu.com`, `xhslink.com` | Page embedded data |
 | Weibo | `weibo.com`, `weibo.cn`, `m.weibo.cn` | Mobile API |
+| Instagram | `instagram.com` | yt-dlp extraction |
 
 ### Limitations
 
