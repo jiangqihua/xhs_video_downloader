@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Video Downloader for Xiaohongshu and Weibo
+Video Downloader for Xiaohongshu, Weibo, and Instagram
 Reads QR code from screenshot, auto-detects platform, and downloads video from the post.
 """
 
@@ -14,6 +14,7 @@ from abc import ABC, abstractmethod
 
 import cv2
 import requests
+import yt_dlp
 from PIL import Image
 from pyzbar.pyzbar import decode
 
@@ -129,6 +130,8 @@ def detect_platform(url: str) -> str:
         return 'weibo'
     elif 'xiaohongshu.com' in url_lower or 'xhslink.com' in url_lower:
         return 'xiaohongshu'
+    elif 'instagram.com' in url_lower:
+        return 'instagram'
     else:
         raise ValueError(f"Unknown platform for URL: {url}")
 
@@ -328,6 +331,66 @@ class WeiboDownloader(BaseDownloader):
         return self.download_video(video_url, output_path, referer='https://m.weibo.cn/')
 
 
+class InstagramDownloader(BaseDownloader):
+    """Downloader for Instagram videos using yt-dlp."""
+
+    def __init__(self):
+        super().__init__()
+
+    def get_video_info(self, url: str) -> tuple[str, str]:
+        """Get video URL and title using yt-dlp."""
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': False,
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+
+        if not info:
+            raise ValueError("Could not extract video information from Instagram.")
+
+        # Get the best format with video (prefer progressive mp4)
+        formats = info.get('formats', [])
+        video_url = None
+
+        # First try to find a progressive format (has both video and audio)
+        for fmt in formats:
+            if fmt.get('ext') == 'mp4' and fmt.get('acodec') != 'none' and fmt.get('vcodec') != 'none':
+                video_url = fmt.get('url')
+                break
+
+        # Fallback to the default URL
+        if not video_url:
+            video_url = info.get('url')
+
+        if not video_url:
+            raise ValueError("Could not find video URL in Instagram response.")
+
+        # Get title from description or channel
+        title = info.get('description', '')
+        if title:
+            title = sanitize_filename(title)
+        if not title:
+            title = f"instagram_{info.get('channel', info.get('id', 'video'))}"
+
+        return video_url, title
+
+    def download(self, url: str, output_dir: str) -> str:
+        """Download video from Instagram URL."""
+        print("Platform: Instagram")
+        print("Fetching video information...")
+
+        video_url, title = self.get_video_info(url)
+        print(f"Found video: {title}")
+
+        output_path = os.path.join(output_dir, f"{title}.mp4")
+        output_path = get_unique_path(output_path)
+
+        return self.download_video(video_url, output_path, referer='https://www.instagram.com/')
+
+
 def get_unique_path(output_path: str) -> str:
     """Get a unique file path to avoid overwriting."""
     if not os.path.exists(output_path):
@@ -357,6 +420,8 @@ def download_from_screenshot(screenshot_path: str, output_dir: str = None) -> st
     # Use appropriate downloader
     if platform == 'weibo':
         downloader = WeiboDownloader()
+    elif platform == 'instagram':
+        downloader = InstagramDownloader()
     else:
         downloader = XiaohongshuDownloader()
 
@@ -374,6 +439,8 @@ def download_from_url(url: str, output_dir: str = None) -> str:
 
     if platform == 'weibo':
         downloader = WeiboDownloader()
+    elif platform == 'instagram':
+        downloader = InstagramDownloader()
     else:
         downloader = XiaohongshuDownloader()
 
@@ -382,7 +449,7 @@ def download_from_url(url: str, output_dir: str = None) -> str:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Download videos from Xiaohongshu or Weibo via QR code screenshots'
+        description='Download videos from Xiaohongshu, Weibo, or Instagram via QR code screenshots'
     )
     parser.add_argument(
         'input',

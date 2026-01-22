@@ -28,3 +28,9 @@ __pycache__/
 downloads/
 *.mp4
 *.webm
+
+# Test images
+test/*.PNG
+test/*.png
+test/*.jpg
+test/*.jpeg
