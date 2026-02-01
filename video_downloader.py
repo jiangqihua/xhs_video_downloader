@@ -8,8 +8,10 @@ import argparse
 import glob
 import json
 import os
+import random
 import re
 import sys
+import time
 from abc import ABC, abstractmethod
 
 import cv2
@@ -183,7 +185,12 @@ class BaseDownloader(ABC):
                         percent = (downloaded / total_size) * 100
                         print(f"\rProgress: {percent:.1f}%", end='', flush=True)
 
-        print(f"\nVideo saved to: {output_path}")
+        file_size = os.path.getsize(output_path)
+        if file_size >= 1024 * 1024:
+            size_str = f"{file_size / (1024 * 1024):.1f} MB"
+        else:
+            size_str = f"{file_size / 1024:.1f} KB"
+        print(f"\nVideo saved to: {output_path} ({size_str})")
         return output_path
 
 
@@ -334,20 +341,35 @@ class WeiboDownloader(BaseDownloader):
 class InstagramDownloader(BaseDownloader):
     """Downloader for Instagram videos using yt-dlp."""
 
-    def __init__(self):
+    def __init__(self, cookies_from_browser: str = None, cookies_file: str = None):
         super().__init__()
+        self.cookies_from_browser = cookies_from_browser
+        self.cookies_file = cookies_file
 
-    def get_video_info(self, url: str) -> tuple[str, str]:
-        """Get video URL and title using yt-dlp."""
-        ydl_opts = {
+    def _build_ydl_opts(self, use_cookies: bool = False) -> dict:
+        """Build yt-dlp options dict."""
+        opts = {
             'quiet': True,
             'no_warnings': True,
             'extract_flat': False,
         }
+        if use_cookies:
+            if self.cookies_file:
+                opts['cookiefile'] = self.cookies_file
+            elif self.cookies_from_browser:
+                opts['cookiesfrombrowser'] = (self.cookies_from_browser,)
+            else:
+                # Default to chrome when retrying with cookies
+                opts['cookiesfrombrowser'] = ('chrome',)
+        return opts
 
+    def _extract_info(self, url: str, ydl_opts: dict) -> dict:
+        """Extract video info using yt-dlp."""
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+            return ydl.extract_info(url, download=False)
 
+    def _parse_video_info(self, info: dict) -> tuple[str, str]:
+        """Parse video URL and title from extracted info."""
         if not info:
             raise ValueError("Could not extract video information from Instagram.")
 
@@ -377,6 +399,21 @@ class InstagramDownloader(BaseDownloader):
 
         return video_url, title
 
+    def get_video_info(self, url: str) -> tuple[str, str]:
+        """Get video URL and title using yt-dlp, with cookie fallback on rate limit."""
+        # First attempt: without cookies
+        try:
+            info = self._extract_info(url, self._build_ydl_opts(use_cookies=False))
+            return self._parse_video_info(info)
+        except Exception as e:
+            error_msg = str(e).lower()
+            if 'rate-limit' in error_msg or 'login required' in error_msg or 'requested content is not available' in error_msg:
+                cookie_source = self.cookies_file or self.cookies_from_browser or 'chrome'
+                print(f"Rate limited without cookies, retrying with cookies from {cookie_source}...")
+                info = self._extract_info(url, self._build_ydl_opts(use_cookies=True))
+                return self._parse_video_info(info)
+            raise
+
     def download(self, url: str, output_dir: str) -> str:
         """Download video from Instagram URL."""
         print("Platform: Instagram")
@@ -404,8 +441,13 @@ def get_unique_path(output_path: str) -> str:
     return output_path
 
 
-def download_from_screenshot(screenshot_path: str, output_dir: str = None) -> str:
-    """Read QR code from screenshot and download video."""
+def download_from_screenshot(screenshot_path: str, output_dir: str = None,
+                             cookies_from_browser: str = None, cookies_file: str = None) -> tuple[str, str]:
+    """Read QR code from screenshot and download video.
+
+    Returns:
+        A tuple of (output_path, platform).
+    """
     print(f"Reading QR code from: {screenshot_path}")
     qr_url = read_qrcode(screenshot_path)
     print(f"QR Code content: {qr_url}")
@@ -421,14 +463,15 @@ def download_from_screenshot(screenshot_path: str, output_dir: str = None) -> st
     if platform == 'weibo':
         downloader = WeiboDownloader()
     elif platform == 'instagram':
-        downloader = InstagramDownloader()
+        downloader = InstagramDownloader(cookies_from_browser, cookies_file)
     else:
         downloader = XiaohongshuDownloader()
 
-    return downloader.download(qr_url, output_dir)
+    return downloader.download(qr_url, output_dir), platform
 
 
-def download_from_url(url: str, output_dir: str = None) -> str:
+def download_from_url(url: str, output_dir: str = None,
+                      cookies_from_browser: str = None, cookies_file: str = None) -> str:
     """Download video directly from URL."""
     print(f"Processing URL: {url}")
 
@@ -440,7 +483,7 @@ def download_from_url(url: str, output_dir: str = None) -> str:
     if platform == 'weibo':
         downloader = WeiboDownloader()
     elif platform == 'instagram':
-        downloader = InstagramDownloader()
+        downloader = InstagramDownloader(cookies_from_browser, cookies_file)
     else:
         downloader = XiaohongshuDownloader()
 
@@ -471,6 +514,16 @@ def main():
         action='store_true',
         help='Batch mode: process multiple screenshots'
     )
+    parser.add_argument(
+        '--cookies-from-browser',
+        help='Browser to extract cookies from for Instagram (e.g. chrome, firefox, safari)',
+        default=None
+    )
+    parser.add_argument(
+        '--cookies',
+        help='Path to Netscape-format cookies file for Instagram',
+        default=None
+    )
 
     args = parser.parse_args()
 
@@ -490,8 +543,14 @@ def main():
             print(f"[{i}/{len(args.input)}] Processing: {filepath}")
             print("-" * 50)
             try:
-                download_from_screenshot(filepath, args.output)
+                _, platform = download_from_screenshot(filepath, args.output,
+                                                       args.cookies_from_browser, args.cookies)
                 success += 1
+                # Delay between Instagram downloads to avoid rate limiting
+                if platform == 'instagram' and i < len(args.input):
+                    delay = random.uniform(3, 6)
+                    print(f"Waiting {delay:.1f}s to avoid Instagram rate limiting...")
+                    time.sleep(delay)
                 print()
             except Exception as e:
                 print(f"\033[91mError: {e}\033[0m\n", file=sys.stderr)
@@ -504,9 +563,11 @@ def main():
     # Single file mode
     try:
         if args.url:
-            download_from_url(args.input[0], args.output)
+            download_from_url(args.input[0], args.output,
+                              args.cookies_from_browser, args.cookies)
         else:
-            download_from_screenshot(args.input[0], args.output)
+            download_from_screenshot(args.input[0], args.output,
+                                     args.cookies_from_browser, args.cookies)
 
         print("Done!")
 
