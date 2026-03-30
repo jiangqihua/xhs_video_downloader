@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Video Downloader for Xiaohongshu, Weibo, and Instagram
-Reads QR code from screenshot, auto-detects platform, and downloads video from the post.
+Downloader for Xiaohongshu, Weibo, and Instagram
+Reads QR code from screenshot, auto-detects platform, and downloads video or images from the post.
+Weibo posts with multiple images are downloaded into a subfolder.
 """
 
 import argparse
@@ -258,7 +259,7 @@ class XiaohongshuDownloader(BaseDownloader):
 
 
 class WeiboDownloader(BaseDownloader):
-    """Downloader for Weibo videos."""
+    """Downloader for Weibo videos and images."""
 
     def __init__(self):
         super().__init__()
@@ -273,8 +274,8 @@ class WeiboDownloader(BaseDownloader):
         """Extract status ID from Weibo URL."""
         # Pattern: weibo.com/userid/statusid or m.weibo.cn/status/statusid
         patterns = [
-            r'weibo\.com/\d+/(\d+)',
-            r'weibo\.cn/status/(\d+)',
+            r'weibo\.com/\d+/(\w+)',
+            r'weibo\.cn/status/(\w+)',
             r'/(\d{16,})',  # Status IDs are typically 16+ digits
         ]
 
@@ -285,8 +286,8 @@ class WeiboDownloader(BaseDownloader):
 
         raise ValueError(f"Could not extract status ID from URL: {url}")
 
-    def get_video_info(self, url: str) -> tuple[str, str]:
-        """Get video URL and title from Weibo API."""
+    def _fetch_status(self, url: str) -> dict:
+        """Fetch raw status data from Weibo API."""
         status_id = self.extract_status_id(url)
         api_url = f'https://m.weibo.cn/statuses/show?id={status_id}'
 
@@ -297,7 +298,17 @@ class WeiboDownloader(BaseDownloader):
         if data.get('ok') != 1:
             raise ValueError(f"Failed to get Weibo status: {data.get('msg', 'Unknown error')}")
 
-        status = data.get('data', {})
+        return data.get('data', {})
+
+    def _status_title(self, status: dict) -> str:
+        """Extract a sanitized title from status data."""
+        text = re.sub(r'<[^>]+>', '', status.get('text', ''))
+        user_name = status.get('user', {}).get('screen_name', 'weibo')
+        return sanitize_filename(text) if text else f"weibo_{user_name}"
+
+    def get_video_info(self, url: str) -> tuple[str, str]:
+        """Get video URL and title from Weibo API."""
+        status = self._fetch_status(url)
         page_info = status.get('page_info', {})
 
         if page_info.get('type') != 'video':
@@ -315,27 +326,62 @@ class WeiboDownloader(BaseDownloader):
         if not video_url:
             raise ValueError("Could not find video URL in Weibo response.")
 
-        # Get title from text or user name
-        text = status.get('text', '')
-        text = re.sub(r'<[^>]+>', '', text)  # Remove HTML tags
-        user_name = status.get('user', {}).get('screen_name', 'weibo')
+        return video_url, self._status_title(status)
 
-        title = sanitize_filename(text) if text else f"weibo_{user_name}"
+    def _download_images(self, status: dict, status_id: str, output_dir: str) -> str:
+        """Download all images from an image post to output_dir."""
+        pics = status.get('pics', [])
+        if not pics:
+            raise ValueError("This Weibo post does not contain images or videos.")
 
-        return video_url, title
+        print(f"Found {len(pics)} image(s) in post {status_id}")
+
+        last_path = None
+        for i, pic in enumerate(pics, 1):
+            img_url = pic.get('large', {}).get('url') or pic.get('url', '')
+            # Replace size segment with 'original' to get 原图
+            img_url = re.sub(r'(sinaimg\.cn/)\w+(/)', r'\1original\2', img_url)
+            ext = img_url.rsplit('.', 1)[-1].split('?')[0].lower()
+            if ext not in ('jpg', 'jpeg', 'png', 'gif', 'webp'):
+                ext = 'jpg'
+            img_path = os.path.join(output_dir, f"{status_id}_0{i:02d}.{ext}")
+
+            response = self.session.get(img_url, timeout=30)
+            response.raise_for_status()
+            with open(img_path, 'wb') as f:
+                f.write(response.content)
+            print(f"  [{i}/{len(pics)}] {img_path}")
+            last_path = img_path
+
+        return last_path
 
     def download(self, url: str, output_dir: str) -> str:
-        """Download video from Weibo URL."""
+        """Download video or images from Weibo URL."""
         print("Platform: Weibo")
-        print("Fetching video information...")
+        print("Fetching post information...")
 
-        video_url, title = self.get_video_info(url)
-        print(f"Found video: {title}")
+        status = self._fetch_status(url)
+        page_info = status.get('page_info', {})
 
-        output_path = os.path.join(output_dir, f"{title}.mp4")
-        output_path = get_unique_path(output_path)
+        if page_info.get('type') == 'video':
+            # Video post
+            urls = page_info.get('urls', {})
+            video_url = urls.get('mp4_720p_mp4') or urls.get('mp4_hd_mp4') or urls.get('mp4_ld_mp4')
+            if not video_url:
+                media_info = page_info.get('media_info', {})
+                video_url = media_info.get('stream_url_hd') or media_info.get('stream_url')
+            if not video_url:
+                raise ValueError("Could not find video URL in Weibo response.")
 
-        return self.download_video(video_url, output_path, referer='https://m.weibo.cn/')
+            title = self._status_title(status)
+            print(f"Found video: {title}")
+            output_path = os.path.join(output_dir, f"{title}.mp4")
+            output_path = get_unique_path(output_path)
+            return self.download_video(video_url, output_path, referer='https://m.weibo.cn/')
+        else:
+            # Image post
+            status_id = self.extract_status_id(url)
+            return self._download_images(status, status_id, output_dir)
 
 
 class InstagramDownloader(BaseDownloader):
