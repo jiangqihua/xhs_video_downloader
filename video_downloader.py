@@ -75,6 +75,18 @@ def read_qrcode(image_path: str) -> str:
             qr_data = decoded_objects[0].data.decode('utf-8')
             return qr_data
 
+        # Try binary thresholding on the cropped region
+        qr_gray = cv2.cvtColor(qr_region, cv2.COLOR_BGR2GRAY)
+        _, qr_binary = cv2.threshold(qr_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        for scale in [1, 2, 3]:
+            if scale == 1:
+                qr_scaled = qr_binary
+            else:
+                qr_scaled = cv2.resize(qr_binary, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+            decoded_objects = decode(Image.fromarray(qr_scaled))
+            if decoded_objects:
+                return decoded_objects[0].data.decode('utf-8')
+
     # Try scanning bottom portion of image (common QR code location)
     h, w = img.shape[:2]
     bottom_region = img[int(h * 0.6):, :]  # Bottom 40% of image
