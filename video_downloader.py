@@ -358,11 +358,22 @@ class WeiboDownloader(BaseDownloader):
                 ext = 'jpg'
             img_path = os.path.join(output_dir, f"{status_id}_0{i:02d}.{ext}")
 
-            response = self.session.get(img_url, timeout=30)
-            response.raise_for_status()
-            with open(img_path, 'wb') as f:
-                f.write(response.content)
-            print(f"  [{i}/{len(pics)}] {img_path}")
+            max_retries = 3
+            for attempt in range(1, max_retries + 1):
+                try:
+                    response = self.session.get(img_url, timeout=30)
+                    response.raise_for_status()
+                    with open(img_path, 'wb') as f:
+                        f.write(response.content)
+                    print(f"  [{i}/{len(pics)}] {img_path}")
+                    break
+                except (requests.ConnectionError, requests.Timeout, requests.HTTPError) as e:
+                    if attempt == max_retries:
+                        print(f"  [{i}/{len(pics)}] Failed after {max_retries} attempts: {e}")
+                        raise
+                    wait = attempt * 3
+                    print(f"  [{i}/{len(pics)}] Attempt {attempt} failed ({e}), retrying in {wait}s...")
+                    time.sleep(wait)
             last_path = img_path
 
         return last_path
