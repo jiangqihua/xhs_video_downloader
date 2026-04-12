@@ -606,7 +606,7 @@ def main():
     if args.batch:
         print(f"Found {len(args.input)} file(s) to process\n")
         success = 0
-        failed = 0
+        failures = []
 
         for i, filepath in enumerate(args.input, 1):
             print(f"[{i}/{len(args.input)}] Processing: {filepath}")
@@ -623,11 +623,14 @@ def main():
                 print()
             except Exception as e:
                 print(f"\033[91mError: {e}\033[0m\n", file=sys.stderr)
-                failed += 1
+                failures.append({"file": filepath, "reason": str(e)})
 
         print("=" * 50)
-        print(f"Batch complete: {success} succeeded, {failed} failed")
-        sys.exit(0 if failed == 0 else 1)
+        print(f"Batch complete: {success} succeeded, {len(failures)} failed")
+        if failures:
+            print("\nFailed downloads:")
+            print(json.dumps(failures, ensure_ascii=False, indent=2))
+        sys.exit(0 if not failures else 1)
 
     # Single file mode
     try:
