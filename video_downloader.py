@@ -22,6 +22,49 @@ from PIL import Image
 from pyzbar.pyzbar import decode
 
 
+def _decode_with_locate(region) -> str:
+    """Use OpenCV to locate a QR code in a region, then crop+scale for pyzbar."""
+    detector = cv2.QRCodeDetector()
+    data, vertices, _ = detector.detectAndDecode(region)
+    if data:
+        return data
+    if vertices is None or len(vertices) == 0:
+        return None
+
+    pts = vertices[0].astype(int)
+    x_min, y_min = pts.min(axis=0)
+    x_max, y_max = pts.max(axis=0)
+
+    padding = 50
+    h, w = region.shape[:2]
+    x_min = max(0, x_min - padding)
+    y_min = max(0, y_min - padding)
+    x_max = min(w, x_max + padding)
+    y_max = min(h, y_max + padding)
+
+    qr_region = region[y_min:y_max, x_min:x_max]
+
+    for scale in [2, 3, 4]:
+        scaled = cv2.resize(qr_region, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        scaled_rgb = cv2.cvtColor(scaled, cv2.COLOR_BGR2RGB)
+        decoded = decode(Image.fromarray(scaled_rgb))
+        if decoded:
+            return decoded[0].data.decode('utf-8')
+
+    qr_gray = cv2.cvtColor(qr_region, cv2.COLOR_BGR2GRAY)
+    _, qr_binary = cv2.threshold(qr_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    for scale in [1, 2, 3]:
+        if scale == 1:
+            s = qr_binary
+        else:
+            s = cv2.resize(qr_binary, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        decoded = decode(Image.fromarray(s))
+        if decoded:
+            return decoded[0].data.decode('utf-8')
+
+    return None
+
+
 def read_qrcode(image_path: str) -> str:
     """Read QR code from an image with enhanced detection."""
     if not os.path.exists(image_path):
@@ -40,55 +83,23 @@ def read_qrcode(image_path: str) -> str:
     if img is None:
         raise ValueError(f"Could not read image: {image_path}")
 
-    # Use OpenCV QR detector to locate QR code position
-    detector = cv2.QRCodeDetector()
-    data, vertices, _ = detector.detectAndDecode(img)
+    # Try OpenCV locate-then-decode on full image and on progressively smaller
+    # bottom slices. Long screenshots (tall aspect ratio) often place the QR in
+    # the bottom corner; the full-image detector may miss it or return a false
+    # positive on unrelated icons, while smaller bottom crops locate it cleanly.
+    h, w = img.shape[:2]
+    regions = [img]
+    for pct in [0.5, 0.25, 0.1]:
+        top = int(h * (1 - pct))
+        if top < h:
+            regions.append(img[top:, :])
 
-    # If OpenCV decoded it directly, return
-    if data:
-        return data
-
-    # If QR code located but not decoded, crop and scale that region
-    if vertices is not None and len(vertices) > 0:
-        pts = vertices[0].astype(int)
-        x_min, y_min = pts.min(axis=0)
-        x_max, y_max = pts.max(axis=0)
-
-        # Add padding
-        padding = 50
-        h, w = img.shape[:2]
-        x_min = max(0, x_min - padding)
-        y_min = max(0, y_min - padding)
-        x_max = min(w, x_max + padding)
-        y_max = min(h, y_max + padding)
-
-        # Crop and scale
-        qr_region = img[y_min:y_max, x_min:x_max]
-        scaled = cv2.resize(qr_region, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-
-        # Try pyzbar on scaled crop
-        scaled_rgb = cv2.cvtColor(scaled, cv2.COLOR_BGR2RGB)
-        scaled_pil = Image.fromarray(scaled_rgb)
-        decoded_objects = decode(scaled_pil)
-
-        if decoded_objects:
-            qr_data = decoded_objects[0].data.decode('utf-8')
-            return qr_data
-
-        # Try binary thresholding on the cropped region
-        qr_gray = cv2.cvtColor(qr_region, cv2.COLOR_BGR2GRAY)
-        _, qr_binary = cv2.threshold(qr_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        for scale in [1, 2, 3]:
-            if scale == 1:
-                qr_scaled = qr_binary
-            else:
-                qr_scaled = cv2.resize(qr_binary, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-            decoded_objects = decode(Image.fromarray(qr_scaled))
-            if decoded_objects:
-                return decoded_objects[0].data.decode('utf-8')
+    for region in regions:
+        result = _decode_with_locate(region)
+        if result:
+            return result
 
     # Try scanning bottom portion of image (common QR code location)
-    h, w = img.shape[:2]
     bottom_region = img[int(h * 0.6):, :]  # Bottom 40% of image
 
     # Try multiple scale factors on bottom region
