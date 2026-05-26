@@ -22,8 +22,25 @@ from PIL import Image
 from pyzbar.pyzbar import decode
 
 
+# OpenCV's resize/remap and detectAndDecode assert that every image dimension
+# stays below SHRT_MAX. Very long screenshots (tall aspect ratio) blow past this
+# and raise an assertion, so we cap any image handed to OpenCV below the limit.
+_CV_MAX_DIM = 32767
+
+
+def _safe_resize(src, scale, interpolation=cv2.INTER_CUBIC):
+    """cv2.resize by a scale factor, returning None if the source or the scaled
+    result would exceed OpenCV's SHRT_MAX dimension limit."""
+    h, w = src.shape[:2]
+    if max(h, w) >= _CV_MAX_DIM or max(h, w) * scale >= _CV_MAX_DIM:
+        return None
+    return cv2.resize(src, None, fx=scale, fy=scale, interpolation=interpolation)
+
+
 def _decode_with_locate(region) -> str:
     """Use OpenCV to locate a QR code in a region, then crop+scale for pyzbar."""
+    if max(region.shape[:2]) >= _CV_MAX_DIM:
+        return None
     detector = cv2.QRCodeDetector()
     data, vertices, _ = detector.detectAndDecode(region)
     if data:
@@ -45,7 +62,9 @@ def _decode_with_locate(region) -> str:
     qr_region = region[y_min:y_max, x_min:x_max]
 
     for scale in [2, 3, 4]:
-        scaled = cv2.resize(qr_region, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        scaled = _safe_resize(qr_region, scale)
+        if scaled is None:
+            continue
         scaled_rgb = cv2.cvtColor(scaled, cv2.COLOR_BGR2RGB)
         decoded = decode(Image.fromarray(scaled_rgb))
         if decoded:
@@ -57,7 +76,9 @@ def _decode_with_locate(region) -> str:
         if scale == 1:
             s = qr_binary
         else:
-            s = cv2.resize(qr_binary, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+            s = _safe_resize(qr_binary, scale)
+            if s is None:
+                continue
         decoded = decode(Image.fromarray(s))
         if decoded:
             return decoded[0].data.decode('utf-8')
@@ -83,28 +104,44 @@ def read_qrcode(image_path: str) -> str:
     if img is None:
         raise ValueError(f"Could not read image: {image_path}")
 
-    # Try OpenCV locate-then-decode on full image and on progressively smaller
+    # Try locate-then-decode on the full image and on progressively smaller
     # bottom slices. Long screenshots (tall aspect ratio) often place the QR in
     # the bottom corner; the full-image detector may miss it or return a false
     # positive on unrelated icons, while smaller bottom crops locate it cleanly.
+    # The percentage slices handle normal screenshots; the fixed-height crops
+    # keep a small bottom-corner QR a large enough fraction of the frame for
+    # pyzbar on very long screenshots, where even "10% of height" is too tall.
     h, w = img.shape[:2]
-    regions = [img]
-    for pct in [0.5, 0.25, 0.1]:
-        top = int(h * (1 - pct))
-        if top < h:
-            regions.append(img[top:, :])
+    slice_tops = [int(h * (1 - pct)) for pct in [0.5, 0.25, 0.1]]
+    slice_tops += [h - px for px in [2000, 1200, 800]]
+    # Cap each slice under OpenCV's SHRT_MAX limit and drop empties/duplicates.
+    slice_tops = sorted({max(t, h - (_CV_MAX_DIM - 1)) for t in slice_tops if 0 < t < h})
+
+    regions = []
+    if max(h, w) < _CV_MAX_DIM:
+        regions.append(img)
+    regions += [img[t:, :] for t in slice_tops]
 
     for region in regions:
         result = _decode_with_locate(region)
         if result:
             return result
+        # Raw pyzbar catches small QRs the OpenCV locator misses, as long as the
+        # slice is small enough for the code to register a meaningful fraction.
+        decoded_objects = decode(Image.fromarray(cv2.cvtColor(region, cv2.COLOR_BGR2RGB)))
+        if decoded_objects:
+            return decoded_objects[0].data.decode('utf-8')
 
-    # Try scanning bottom portion of image (common QR code location)
-    bottom_region = img[int(h * 0.6):, :]  # Bottom 40% of image
+    # Try scanning bottom portion of image (common QR code location), capped so
+    # the slice fits within OpenCV's dimension limit on very long screenshots.
+    bottom_top = max(int(h * 0.6), h - (_CV_MAX_DIM - 1))
+    bottom_region = img[bottom_top:, :]
 
     # Try multiple scale factors on bottom region
     for scale in [2, 3, 4]:
-        scaled = cv2.resize(bottom_region, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        scaled = _safe_resize(bottom_region, scale)
+        if scaled is None:
+            continue
         scaled_rgb = cv2.cvtColor(scaled, cv2.COLOR_BGR2RGB)
         scaled_pil = Image.fromarray(scaled_rgb)
         decoded_objects = decode(scaled_pil)
@@ -120,7 +157,9 @@ def read_qrcode(image_path: str) -> str:
     enhanced = clahe.apply(gray)
 
     for scale in [2, 3]:
-        scaled = cv2.resize(enhanced, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        scaled = _safe_resize(enhanced, scale)
+        if scaled is None:
+            continue
         scaled_pil = Image.fromarray(scaled)
         decoded_objects = decode(scaled_pil)
         if decoded_objects:
@@ -129,16 +168,19 @@ def read_qrcode(image_path: str) -> str:
 
     # Try binary thresholding
     _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    scaled = cv2.resize(binary, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-    scaled_pil = Image.fromarray(scaled)
-    decoded_objects = decode(scaled_pil)
-    if decoded_objects:
-        qr_data = decoded_objects[0].data.decode('utf-8')
-        return qr_data
+    scaled = _safe_resize(binary, 2)
+    if scaled is not None:
+        scaled_pil = Image.fromarray(scaled)
+        decoded_objects = decode(scaled_pil)
+        if decoded_objects:
+            qr_data = decoded_objects[0].data.decode('utf-8')
+            return qr_data
 
     # Last resort: scale entire image with different factors
     for scale in [2, 3]:
-        scaled = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        scaled = _safe_resize(img, scale)
+        if scaled is None:
+            continue
         scaled_rgb = cv2.cvtColor(scaled, cv2.COLOR_BGR2RGB)
         scaled_pil = Image.fromarray(scaled_rgb)
         decoded_objects = decode(scaled_pil)
