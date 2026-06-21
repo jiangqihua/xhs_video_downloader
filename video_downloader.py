@@ -550,6 +550,39 @@ class InstagramDownloader(BaseDownloader):
         return self.download_video(video_url, output_path, referer='https://www.instagram.com/')
 
 
+def read_url_file(path: str) -> str:
+    """Read the target URL from a Windows .url InternetShortcut file."""
+    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+        for line in f:
+            line = line.strip()
+            if line.upper().startswith('URL='):
+                url = line[4:].strip()
+                if url:
+                    return url
+    raise ValueError(f"No URL found in shortcut file: {path}")
+
+
+def expand_inputs(inputs: list[str]) -> list[str]:
+    """Expand any directory inputs into the screenshot/.url files they contain.
+
+    Non-directory inputs are passed through unchanged.
+    """
+    files = []
+    for item in inputs:
+        if os.path.isdir(item):
+            matches = sorted(
+                glob.glob(os.path.join(item, '*.url'))
+                + glob.glob(os.path.join(item, '*.png'))
+                + glob.glob(os.path.join(item, '*.PNG'))
+                + glob.glob(os.path.join(item, '*.jpg'))
+                + glob.glob(os.path.join(item, '*.jpeg'))
+            )
+            files.extend(matches)
+        else:
+            files.append(item)
+    return files
+
+
 def get_unique_path(output_path: str) -> str:
     """Get a unique file path to avoid overwriting."""
     if not os.path.exists(output_path):
@@ -612,6 +645,25 @@ def download_from_url(url: str, output_dir: str = None,
     return downloader.download(url, output_dir)
 
 
+def download_from_input(filepath: str, output_dir: str = None,
+                        cookies_from_browser: str = None, cookies_file: str = None) -> tuple[str, str]:
+    """Process a single input, auto-detecting .url shortcut files vs screenshots.
+
+    Returns:
+        A tuple of (output_path, platform).
+    """
+    if filepath.lower().endswith('.url'):
+        url = read_url_file(filepath)
+        print(f"URL from shortcut: {url}")
+        platform = detect_platform(url)
+        # Default output next to the .url file, mirroring screenshot behaviour.
+        out_dir = output_dir or os.path.dirname(os.path.abspath(filepath))
+        output_path = download_from_url(url, out_dir, cookies_from_browser, cookies_file)
+        return output_path, platform
+
+    return download_from_screenshot(filepath, output_dir, cookies_from_browser, cookies_file)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Download videos from Xiaohongshu, Weibo, or Instagram via QR code screenshots'
@@ -634,7 +686,7 @@ def main():
     parser.add_argument(
         '-b', '--batch',
         action='store_true',
-        help='Batch mode: process multiple screenshots'
+        help='Batch mode: process multiple screenshots and/or .url files'
     )
     parser.add_argument(
         '--cookies-from-browser',
@@ -657,19 +709,20 @@ def main():
 
     # Batch mode
     if args.batch:
-        print(f"Found {len(args.input)} file(s) to process\n")
+        files = expand_inputs(args.input)
+        print(f"Found {len(files)} file(s) to process\n")
         success = 0
         failures = []
 
-        for i, filepath in enumerate(args.input, 1):
-            print(f"[{i}/{len(args.input)}] Processing: {filepath}")
+        for i, filepath in enumerate(files, 1):
+            print(f"[{i}/{len(files)}] Processing: {filepath}")
             print("-" * 50)
             try:
-                _, platform = download_from_screenshot(filepath, args.output,
-                                                       args.cookies_from_browser, args.cookies)
+                _, platform = download_from_input(filepath, args.output,
+                                                  args.cookies_from_browser, args.cookies)
                 success += 1
                 # Delay between Instagram downloads to avoid rate limiting
-                if platform == 'instagram' and i < len(args.input):
+                if platform == 'instagram' and i < len(files):
                     delay = random.uniform(3, 6)
                     print(f"Waiting {delay:.1f}s to avoid Instagram rate limiting...")
                     time.sleep(delay)
@@ -691,8 +744,8 @@ def main():
             download_from_url(args.input[0], args.output,
                               args.cookies_from_browser, args.cookies)
         else:
-            download_from_screenshot(args.input[0], args.output,
-                                     args.cookies_from_browser, args.cookies)
+            download_from_input(args.input[0], args.output,
+                                args.cookies_from_browser, args.cookies)
 
         print("Done!")
 
