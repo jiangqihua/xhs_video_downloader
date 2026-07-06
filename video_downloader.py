@@ -721,10 +721,14 @@ def main():
                 _, platform = download_from_input(filepath, args.output,
                                                   args.cookies_from_browser, args.cookies)
                 success += 1
-                # Delay between Instagram downloads to avoid rate limiting
+                # Delay between downloads to avoid rate limiting
                 if platform == 'instagram' and i < len(files):
                     delay = random.uniform(3, 6)
                     print(f"Waiting {delay:.1f}s to avoid Instagram rate limiting...")
+                    time.sleep(delay)
+                elif platform == 'xiaohongshu' and i < len(files):
+                    delay = random.uniform(3, 6)
+                    print(f"Waiting {delay:.1f}s to avoid Xiaohongshu rate limiting...")
                     time.sleep(delay)
                 print()
             except Exception as e:
