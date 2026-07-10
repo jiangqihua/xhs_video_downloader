@@ -11,6 +11,7 @@ import json
 import os
 import random
 import re
+import subprocess
 import sys
 import time
 from abc import ABC, abstractmethod
@@ -529,7 +530,15 @@ class InstagramDownloader(BaseDownloader):
             return self._parse_video_info(info)
         except Exception as e:
             error_msg = str(e).lower()
-            if 'rate-limit' in error_msg or 'login required' in error_msg or 'requested content is not available' in error_msg:
+            cookie_hints = (
+                'rate-limit',
+                'login required',
+                'requested content is not available',
+                'empty media response',
+                '--cookies-from-browser',
+                '--cookies',
+            )
+            if any(hint in error_msg for hint in cookie_hints):
                 cookie_source = self.cookies_file or self.cookies_from_browser or 'chrome'
                 print(f"Rate limited without cookies, retrying with cookies from {cookie_source}...")
                 info = self._extract_info(url, self._build_ydl_opts(use_cookies=True))
@@ -664,6 +673,43 @@ def download_from_input(filepath: str, output_dir: str = None,
     return download_from_screenshot(filepath, output_dir, cookies_from_browser, cookies_file)
 
 
+def upgrade_yt_dlp() -> None:
+    """Upgrade yt-dlp to the latest release before downloading.
+
+    Instagram breaks yt-dlp's extractor frequently, so an out-of-date install
+    surfaces as an "empty media response" error. Upgrading at startup keeps the
+    extractor current. Network/pip failures are non-fatal — we fall back to the
+    already-installed version so offline runs still work.
+    """
+    print("Checking for yt-dlp updates...")
+    try:
+        result = subprocess.run(
+            [sys.executable, '-m', 'pip', 'install', '--upgrade', '--quiet', 'yt-dlp'],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        print(f"  Skipping upgrade (could not run pip: {e})")
+        return
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or '').strip().splitlines()
+        reason = detail[-1] if detail else 'unknown error'
+        print(f"  Skipping upgrade (pip failed: {reason})")
+        return
+
+    # yt_dlp is imported at module load; report the version pip left in place.
+    try:
+        version = subprocess.run(
+            [sys.executable, '-m', 'yt_dlp', '--version'],
+            capture_output=True, text=True, timeout=15,
+        ).stdout.strip()
+        print(f"  yt-dlp is up to date ({version})")
+    except (subprocess.TimeoutExpired, OSError):
+        print("  yt-dlp upgrade check complete")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Download videos from Xiaohongshu, Weibo, or Instagram via QR code screenshots'
@@ -698,11 +744,19 @@ def main():
         help='Path to Netscape-format cookies file for Instagram',
         default=None
     )
+    parser.add_argument(
+        '--no-upgrade',
+        action='store_true',
+        help='Skip the yt-dlp update check at startup'
+    )
 
     args = parser.parse_args()
 
     if not args.input:
         parser.error("input is required")
+
+    if not args.no_upgrade:
+        upgrade_yt_dlp()
 
     if len(args.input) > 1 and not args.batch:
         parser.error("multiple inputs require --batch flag")
