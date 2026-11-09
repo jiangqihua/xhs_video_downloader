@@ -372,27 +372,27 @@ class WeiboDownloader(BaseDownloader):
         user_name = status.get('user', {}).get('screen_name', 'weibo')
         return sanitize_filename(text) if text else f"weibo_{user_name}"
 
+    @staticmethod
+    def _is_video(status: dict) -> bool:
+        return status.get('page_info', {}).get('type') == 'video'
+
+    def _video_url(self, status: dict) -> str:
+        """Pick the best video URL from status data (720p preferred)."""
+        page_info = status.get('page_info', {})
+        urls = page_info.get('urls', {})
+        media_info = page_info.get('media_info', {})
+        video_url = (urls.get('mp4_720p_mp4') or urls.get('mp4_hd_mp4') or urls.get('mp4_ld_mp4')
+                     or media_info.get('stream_url_hd') or media_info.get('stream_url'))
+        if not video_url:
+            raise ValueError("Could not find video URL in Weibo response.")
+        return video_url
+
     def get_video_info(self, url: str) -> tuple[str, str]:
         """Get video URL and title from Weibo API."""
         status = self._fetch_status(url)
-        page_info = status.get('page_info', {})
-
-        if page_info.get('type') != 'video':
+        if not self._is_video(status):
             raise ValueError("This Weibo post does not contain a video.")
-
-        # Get video URLs (prefer highest quality)
-        urls = page_info.get('urls', {})
-        video_url = urls.get('mp4_720p_mp4') or urls.get('mp4_hd_mp4') or urls.get('mp4_ld_mp4')
-
-        if not video_url:
-            # Try media_info as fallback
-            media_info = page_info.get('media_info', {})
-            video_url = media_info.get('stream_url_hd') or media_info.get('stream_url')
-
-        if not video_url:
-            raise ValueError("Could not find video URL in Weibo response.")
-
-        return video_url, self._status_title(status)
+        return self._video_url(status), self._status_title(status)
 
     def _download_images(self, status: dict, status_id: str, output_dir: str) -> str:
         """Download all images from an image post to output_dir."""
@@ -438,18 +438,9 @@ class WeiboDownloader(BaseDownloader):
         print("Fetching post information...")
 
         status = self._fetch_status(url)
-        page_info = status.get('page_info', {})
 
-        if page_info.get('type') == 'video':
-            # Video post
-            urls = page_info.get('urls', {})
-            video_url = urls.get('mp4_720p_mp4') or urls.get('mp4_hd_mp4') or urls.get('mp4_ld_mp4')
-            if not video_url:
-                media_info = page_info.get('media_info', {})
-                video_url = media_info.get('stream_url_hd') or media_info.get('stream_url')
-            if not video_url:
-                raise ValueError("Could not find video URL in Weibo response.")
-
+        if self._is_video(status):
+            video_url = self._video_url(status)
             title = self._status_title(status)
             print(f"Found video: {title}")
             output_path = os.path.join(output_dir, f"{title}.mp4")
@@ -605,70 +596,46 @@ def get_unique_path(output_path: str) -> str:
     return output_path
 
 
-def download_from_screenshot(screenshot_path: str, output_dir: str = None,
-                             cookies_from_browser: str = None, cookies_file: str = None) -> tuple[str, str]:
-    """Read QR code from screenshot and download video.
-
-    Returns:
-        A tuple of (output_path, platform).
-    """
-    print(f"Reading QR code from: {screenshot_path}")
-    qr_url = read_qrcode(screenshot_path)
-    print(f"QR Code content: {qr_url}")
-
-    # Detect platform
-    platform = detect_platform(qr_url)
-
-    # Set output directory to same folder as screenshot if not specified
-    if output_dir is None:
-        output_dir = os.path.dirname(os.path.abspath(screenshot_path))
-
-    # Use appropriate downloader
+def make_downloader(platform: str, cookies_from_browser: str = None,
+                    cookies_file: str = None) -> BaseDownloader:
+    """Instantiate the downloader for a platform returned by detect_platform."""
     if platform == 'weibo':
-        downloader = WeiboDownloader()
-    elif platform == 'instagram':
-        downloader = InstagramDownloader(cookies_from_browser, cookies_file)
-    else:
-        downloader = XiaohongshuDownloader()
-
-    return downloader.download(qr_url, output_dir), platform
+        return WeiboDownloader()
+    if platform == 'instagram':
+        return InstagramDownloader(cookies_from_browser, cookies_file)
+    return XiaohongshuDownloader()
 
 
 def download_from_url(url: str, output_dir: str = None,
                       cookies_from_browser: str = None, cookies_file: str = None) -> str:
-    """Download video directly from URL."""
+    """Download a post from its URL into output_dir (default: current directory)."""
     print(f"Processing URL: {url}")
+    downloader = make_downloader(detect_platform(url), cookies_from_browser, cookies_file)
+    return downloader.download(url, output_dir or os.getcwd())
 
-    platform = detect_platform(url)
 
-    if output_dir is None:
-        output_dir = os.getcwd()
+def download_from_screenshot(screenshot_path: str, output_dir: str = None,
+                             cookies_from_browser: str = None, cookies_file: str = None) -> str:
+    """Read the QR code from a screenshot and download the post it links to.
 
-    if platform == 'weibo':
-        downloader = WeiboDownloader()
-    elif platform == 'instagram':
-        downloader = InstagramDownloader(cookies_from_browser, cookies_file)
-    else:
-        downloader = XiaohongshuDownloader()
-
-    return downloader.download(url, output_dir)
+    Output defaults to the screenshot's folder.
+    """
+    print(f"Reading QR code from: {screenshot_path}")
+    qr_url = read_qrcode(screenshot_path)
+    print(f"QR Code content: {qr_url}")
+    out_dir = output_dir or os.path.dirname(os.path.abspath(screenshot_path))
+    return download_from_url(qr_url, out_dir, cookies_from_browser, cookies_file)
 
 
 def download_from_input(filepath: str, output_dir: str = None,
-                        cookies_from_browser: str = None, cookies_file: str = None) -> tuple[str, str]:
-    """Process a single input, auto-detecting .url shortcut files vs screenshots.
-
-    Returns:
-        A tuple of (output_path, platform).
-    """
+                        cookies_from_browser: str = None, cookies_file: str = None) -> str:
+    """Process a single input, auto-detecting .url shortcut files vs screenshots."""
     if filepath.lower().endswith('.url'):
         url = read_url_file(filepath)
         print(f"URL from shortcut: {url}")
-        platform = detect_platform(url)
         # Default output next to the .url file, mirroring screenshot behaviour.
         out_dir = output_dir or os.path.dirname(os.path.abspath(filepath))
-        output_path = download_from_url(url, out_dir, cookies_from_browser, cookies_file)
-        return output_path, platform
+        return download_from_url(url, out_dir, cookies_from_browser, cookies_file)
 
     return download_from_screenshot(filepath, output_dir, cookies_from_browser, cookies_file)
 
@@ -771,23 +738,24 @@ def main():
         for i, filepath in enumerate(files, 1):
             print(f"[{i}/{len(files)}] Processing: {filepath}")
             print("-" * 50)
+            failed = False
             try:
-                _, platform = download_from_input(filepath, args.output,
-                                                  args.cookies_from_browser, args.cookies)
+                download_from_input(filepath, args.output,
+                                    args.cookies_from_browser, args.cookies)
                 success += 1
-                # Delay between downloads to avoid rate limiting
-                if platform == 'instagram' and i < len(files):
-                    delay = random.uniform(3, 6)
-                    print(f"Waiting {delay:.1f}s to avoid Instagram rate limiting...")
-                    time.sleep(delay)
-                elif platform == 'xiaohongshu' and i < len(files):
-                    delay = random.uniform(3, 6)
-                    print(f"Waiting {delay:.1f}s to avoid Xiaohongshu rate limiting...")
-                    time.sleep(delay)
-                print()
             except Exception as e:
-                print(f"\033[91mError: {e}\033[0m\n", file=sys.stderr)
+                failed = True
+                print(f"\033[91mError: {e}\033[0m", file=sys.stderr)
                 failures.append({"file": filepath, "reason": str(e)})
+
+            # Pause between items to avoid rate limiting. A failure (often a
+            # rate-limit response) gets a longer back-off than a success.
+            if i < len(files):
+                delay = random.uniform(10, 20) if failed else random.uniform(3, 6)
+                reason = "after failure" if failed else "to avoid rate limiting"
+                print(f"Waiting {delay:.1f}s {reason}...")
+                time.sleep(delay)
+            print()
 
         print("=" * 50)
         print(f"Batch complete: {success} succeeded, {len(failures)} failed")
